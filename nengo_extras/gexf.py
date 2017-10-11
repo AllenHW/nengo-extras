@@ -5,6 +5,10 @@ import weakref
 import xml.etree.ElementTree as et
 
 import nengo
+try:
+    import nengo_spa as spa
+except ImportError:
+    spa = None
 import numpy as np
 
 
@@ -189,7 +193,10 @@ class GexfConverter(object):
         graph.append(self.dispatch(model))
 
         edges = et.SubElement(graph, 'edges')
-        edges.extend([self.dispatch(c) for c in model.all_connections])
+        for c in model.all_connections:
+            elem = self.dispatch(c)
+            if elem is not None:
+                edges.append(elem)
 
         return et.ElementTree(gexf)
 
@@ -320,3 +327,49 @@ class GexfConverter(object):
     def _get_typename(cls, obj):
         tp = type(obj)
         return tp.__module__ + '.' + tp.__name__
+
+
+class CollapsingGexfConverter(GexfConverter):
+    dispatch = DispatchTable(GexfConverter.dispatch)
+
+    NENGO_NETS = (
+        nengo.networks.CircularConvolution,
+        nengo.networks.EnsembleArray,
+        nengo.networks.Product)
+    if spa is None:
+        SPA_NETS = ()
+    else:
+        SPA_NETS = (
+            spa.networks.CircularConvolution,
+            spa.AssociativeMemory,
+            spa.Bind,
+            spa.Compare,
+            spa.Product,
+            spa.Scalar,
+            spa.State,
+            spa.Transcode)
+
+    def __init__(self, to_collapse=None, labeler=None, hierarchical=False):
+        super(CollapsingGexfConverter, self).__init__(
+            labeler=labeler, hierarchical=hierarchical)
+
+        if to_collapse is None:
+            to_collapse = self.NENGO_NETS + self.SPA_NETS
+
+        for cls in to_collapse:
+            self.dispatch.register(cls, self.convert_collapsed)
+
+        self.obj2collapsed = weakref.WeakKeyDictionary()
+
+    def convert_collapsed(self, net):
+        nodes = et.Element('nodes')
+        nodes.append(self.make_node(
+            net, type=self._get_typename(net), net=id(self._net),
+            net_label=self._labels.get(self._net, None)))
+        self.obj2collapsed.update({
+            child: net for child in net.all_objects})
+        return nodes
+
+    def _get_node_obj(self, obj):
+        obj = super(CollapsingGexfConverter, self)._get_node_obj(obj)
+        return self.obj2collapsed.get(obj, obj)
