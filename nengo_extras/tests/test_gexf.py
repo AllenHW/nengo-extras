@@ -1,6 +1,7 @@
+import nengo
 import pytest
 
-from nengo_extras.gexf import DispatchTable
+from nengo_extras.gexf import DispatchTable, InspectiveLabeler
 
 
 def test_can_dispatch_table_defaults():
@@ -149,3 +150,21 @@ def test_dispatch_errors():
 
     with pytest.raises(NotImplementedError):
         Test().dispatch(object())
+
+
+def test_inspective_labeler():
+    with nengo.Network() as model:
+        ens = nengo.Ensemble(10, 1)
+        with nengo.Network() as subnet:
+            node = nengo.Node(1.)
+            subnet.attr = nengo.Ensemble(10, 1)
+
+    labels = InspectiveLabeler().get_labels(model)
+    from pprint import pprint
+    pprint(labels)
+    assert labels == {
+        ens: 'ens',
+        subnet: 'subnet',
+        node: 'subnet.node',
+        subnet.attr: 'subnet.attr',
+    }
