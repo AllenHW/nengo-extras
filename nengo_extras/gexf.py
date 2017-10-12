@@ -1,3 +1,5 @@
+"""Export to GEXF for visualization of networks in Gephi."""
+
 from collections import namedtuple, OrderedDict
 from datetime import date
 import gc
@@ -13,7 +15,50 @@ import numpy as np
 
 
 class DispatchTable(object):
+    """A descriptor to dispatch to other methods depending on argument type.
+
+    How to use: assign the descriptor to a class attribute and use the
+    `register` decorator to declare which functions to dispatch to for specific
+    types::
+
+        class MyClass(object):
+            dispatch = DispatchTable()
+
+            @dispatch.register(TypeA)
+            def handle_type_a(self, obj_of_type_a):
+                # ...
+
+            @dispatch.register(TypeB)
+            def handle_type_b(self, obj_of_type_b):
+                # ...
+
+    To then call the method for the appropriate type::
+
+        inst = MyClass()
+        inst.dispatch(obj_of_type_a_or_b)
+
+    If multiple methods would match (e.g. if *TypeB* inherits from *TypeA*),
+    the most specific method will be used (to be precise: the first type in the
+    method resolution order with a registered method will be used).
+
+    The *DispatchTable* descriptor accepts another *DispatchTable* as argument
+    which will be used as a fallback. This allows to inherit the dispatch
+    table and selectively overwrite methods like so::
+
+        class Inherited(MyClass):
+            dispatch = DispatchTable(MyClass.dispatch)
+
+            @dispatch.register(TypeA)
+            def alternate_type_a_handler(self, obj_of_type_a):
+                # ...
+
+    Finally, dispatch methods can also be changed on a per-instance basis::
+
+        inst.dispatch.register(TypeA, inst_type_a_handler)
+    """
+
     class InstDispatch(object):
+        """Return value when accessing the dispatch table on an instance."""
         __slots__ = ('param', 'inst', 'owner')
 
         def __init__(self, param, inst, owner):
@@ -63,7 +108,78 @@ class DispatchTable(object):
 
 
 class InspectiveLabeler(object):
+    """Obtains labels for objects in a Nengo network.
+
+    It will inspect dictionaries and stack frames referring to the objects to
+    find a suitable name. This does not always work because there will not
+    be a name in memory for objects that where created in methods that finished
+    executing without assigning the object to an attribute. Those objects
+    might end up with a non-useful name from some other stack frame.
+
+    Note that the labeling can take a while because the all Python objects
+    need to be scanned to find the referring objects.
+
+    Usage example::
+
+        labels = InspectiveLabeler().get_labels(model)
+    """
+
     dispatch = DispatchTable()
+
+    def get_labels(self, net):
+        """Get labels for objects in *net*.
+
+        Note that outer *net* itself will not be included.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping objects to names.
+        """
+
+        labels = {}
+        for group in net.objects.values():
+            for o in group:
+                labels.update(self.dispatch(o))
+        return labels
+
+    @dispatch.register(nengo.Network)
+    def get_net_labels(self, net):
+        """Get labels for objects in *net* prepended with *net's* label.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping objects to names.
+        """
+        labels = self.get_obj_label(net)
+        labels.update({
+            k: labels[net] + '.' + v for k, v in self.get_labels(net).items()})
+        return labels
+
+    @dispatch.register(nengo.base.NengoObject)
+    def get_obj_label(self, obj):
+        """Get labels for object *obj*.
+
+        Returns
+        -------
+        dict
+            Dictionary with the mapping from *obj* to it's label.
+        """
+        name = None
+        if obj.label is not None:
+            name = obj.label
+        else:
+            for referrer in gc.get_referrers(obj):
+                if hasattr(referrer, 'items'):
+                    new_name = self._find_name_in_dict(referrer, obj)
+                    if new_name is not None:
+                        name = new_name
+                elif name is None and self._is_frame(referrer):
+                    name = self._find_name_in_frame(referrer, obj)
+        if name is None:
+            name = str(obj)
+        return {obj: name}
 
     @classmethod
     def _find_name_in_dict(cls, d, obj):
@@ -93,42 +209,72 @@ class InspectiveLabeler(object):
             hasattr(f, 'f_globals')
         )
 
-    @dispatch.register(nengo.base.NengoObject)
-    def get_obj_label(self, obj):
-        name = None
-        if obj.label is not None:
-            name = obj.label
-        else:
-            for referrer in gc.get_referrers(obj):
-                if hasattr(referrer, 'items'):
-                    new_name = self._find_name_in_dict(referrer, obj)
-                    if new_name is not None:
-                        name = new_name
-                elif name is None and self._is_frame(referrer):
-                    name = self._find_name_in_frame(referrer, obj)
-        if name is None:
-            name = str(obj)
-        return {obj: name}
-
-    @dispatch.register(nengo.Network)
-    def get_net_labels(self, net):
-        labels = self.get_obj_label(net)
-        labels.update({
-            k: labels[net] + '.' + v for k, v in self.get_labels(net).items()})
-        return labels
-
-    def get_labels(self, net):
-        labels = {}
-        for group in net.objects.values():
-            for o in group:
-                labels.update(self.dispatch(o))
-        return labels
-
 
 Attr = namedtuple('Attr', ['id', 'type', 'default'])
 
 
 class GexfConverter(object):
+    """Converts Nengo models into GEXF files.
+
+    This can be loaded in Gephi for visualization of the model graph.
+
+    Links:
+
+    * `Gephi <https://gephi.org/>`_
+    * `GEXF <https://github.com/gephi/gexf/wiki>`_
+
+    This class can be inherited from to customize the conversion or
+    alternatively the `dispatch` table can be changed on a per-instance basis.
+
+    Note that probes are currently not included in the graph.
+
+    The following attributes will be stored on graph nodes:
+
+    * *type*: type of the Nengo object (e.g., *nengo.ensemble.Ensemble*),
+    * *net*: unique ID of the containing network,
+    * *net_label*: (possibly non-unique) label of the containing network,
+    * *size_in*: input size,
+    * *size_out*: output_size,
+    * *radius*: ensemble radius (unset for other nodes),
+    * *n_neurons*: number of neurons (0 for non-ensembles),
+    * *neuron_type*: string representation of the neuron type (unset for
+      non-ensembles).
+
+    The following attributes will be stored on graph edges:
+
+    * *pre_type*: type of the connection's pre object (e.g.,
+      *nengo.ensemble.Neurons*),
+    * *post_type*: type of the connection's post object (e.g.,
+      *nengo.ensemble.Neurons*),
+    * *synapse*: string representation of the synapse,
+    * *tau*: the tau parameter of the synapse if existent,
+    * *function*: string representation of the connection's function,
+    * *transform*: string representation of the connection's transform,
+    * *scalar_transform*: float representation of the transform if it is a
+      scalar,
+    * *learning_rule_type*: string representation of the connection's learning
+      rule type.
+
+    Parameters
+    ----------
+    labeler : optional
+        Object with a `get_labels` method that returns a dictionary mapping
+        model objects to labels. If not given, a new `InspectiveLabeler`
+        will be used.
+    hierarchical : bool, optional (default: False)
+        Whether to include information of the network hierarchy in the file.
+        Support for hierarchical graphs was removed in Gephi 0.9 and
+        hierarchical networks will be automatically flattened which leaves an
+        unconnected node for every network.
+
+    Examples
+    --------
+
+    Basic usage to write a GEXF file::
+
+        GexfConverter().convert(model).write('model.gexf')
+    """
+
     dispatch = DispatchTable()
 
     node_attrs = OrderedDict((
@@ -160,16 +306,36 @@ class GexfConverter(object):
         self.version = (1, 3)
         self.tag = 'draft'
 
-        self._labels = {}
+        # State used during processing of a model
+        # WeakKeyDict so we don't prevent garbage collection after conversion
+        # finished.
+        self._labels = weakref.WeakKeyDictionary()
         self._net = None
 
     def convert(self, model):
+        """Convert a model to GEXF format.
+
+        Returns
+        -------
+        xml.etree.ElementTree.ElementTree
+            Converted model.
+        """
         self._labels = weakref.WeakKeyDictionary(
             self.labeler.get_labels(model))
         self._labels.update(self.labeler.get_obj_label(model))
         return self.make_document(model)
 
     def make_document(self, model):
+        """Create the GEXF XML document from *model*.
+
+        This method is exposed so it can be overwritten in inheriting classes.
+        Invoke `convert` instead of this method to convert a model.
+
+        Returns
+        -------
+        xml.etree.ElementTree.ElementTree
+            Converted model.
+        """
         version = '.'.join(str(i) for i in self.version)
         tag_version = version + self.tag
         gexf = et.Element('gexf', {
@@ -184,7 +350,7 @@ class GexfConverter(object):
         meta = et.SubElement(gexf, 'meta', {
             'lastmodifieddate': date.today().isoformat()})
         creator = et.SubElement(meta, 'creator')
-        creator.text = self._get_typename(self)
+        creator.text = self.get_typename(self)
 
         graph = et.SubElement(gexf, 'graph', {'defaultedgetype': 'directed'})
         graph.append(self.make_attr_defs('node', self.node_attrs))
@@ -201,6 +367,19 @@ class GexfConverter(object):
         return et.ElementTree(gexf)
 
     def make_attr_defs(self, cls, defs):
+        """Generate an attribute definition block.
+
+        Parameters
+        ----------
+        cls : str
+            Class the attribute definitions are for ('node' or 'edge').
+        defs : dict
+            Attribute definitions. Maps attribute names to `Attr` instances.
+
+        Returns
+        -------
+        xml.etree.ElementTree.Element
+        """
         attributes = et.Element('attributes', {'class': cls})
         for k, d in defs.items():
             attr = et.SubElement(attributes, 'attribute', {
@@ -214,6 +393,19 @@ class GexfConverter(object):
         return attributes
 
     def make_attrs(self, defs, attrs):
+        """Generates a block of attribute values.
+
+        Parameters
+        ----------
+        defs : dict
+            Attribute definitions. Maps attribute names to `Attr` instances.
+        attrs : dict
+            Mapping of attribute names to assigned values.
+
+        Returns
+        -------
+        xml.etree.ElementTree.Element
+        """
         values = et.Element('attvalues')
         assert all(k in defs for k in attrs.keys())
         for k, d in defs.items():
@@ -225,6 +417,7 @@ class GexfConverter(object):
         return values
 
     def make_node(self, obj, **attrs):
+        """Generate a node for *obj* with attributes *attrs*."""
         tag_attrib = {'id': str(id(obj))}
         if obj in self._labels:
             tag_attrib['label'] = self._labels[obj]
@@ -234,6 +427,7 @@ class GexfConverter(object):
         return node
 
     def make_edge(self, obj, source, target, **attrs):
+        "Edge for *obj* from *source* to *target* with attributes *attrs*."
         tag_attrib = {
             'id': str(id(obj)),
             'source': str(id(source)),
@@ -243,35 +437,6 @@ class GexfConverter(object):
         if len(attrs) > 0:
             edge.append(self.make_attrs(self.edge_attrs, attrs))
         return edge
-
-    @dispatch.register(nengo.Ensemble)
-    def convert_ensemble(self, ens):
-        return self.make_node(
-            ens,
-            type=self._get_typename(ens),
-            net=id(self._net),
-            net_label=self._labels.get(self._net, None),
-            size_in=ens.dimensions,
-            size_out=ens.dimensions,
-            radius=ens.radius,
-            n_neurons=ens.n_neurons,
-            neuron_type=ens.neuron_type,
-        )
-
-    @dispatch.register(nengo.Node)
-    def convert_node(self, node):
-        return self.make_node(
-            node,
-            type=self._get_typename(node),
-            net=id(self._net),
-            net_label=self._labels.get(self._net, None),
-            size_in=node.size_in,
-            size_out=node.size_out,
-        )
-
-    @dispatch.register(nengo.Probe)
-    def convert_probe(self, probe):
-        return None
 
     @dispatch.register(nengo.Network)
     def convert_network(self, net):
@@ -287,7 +452,7 @@ class GexfConverter(object):
         if self.hierarchical:
             for subnet in net.networks:
                 subnet_node = self.make_node(
-                    subnet, type=self._get_typename(subnet), net=id(self._net),
+                    subnet, type=self.get_typename(subnet), net=id(self._net),
                     net_label=self._labels.get(self._net, None))
                 subnet_node.append(self.dispatch(subnet))
                 nodes.append(subnet_node)
@@ -295,25 +460,46 @@ class GexfConverter(object):
             for subnet in net.networks:
                 nodes.extend(self.dispatch(subnet))
 
-
         self._net = parent_net
         return nodes
 
-    def _get_node_obj(self, obj):
-        if isinstance(obj, nengo.ensemble.Neurons):
-            return obj.ensemble
-        elif isinstance(obj, nengo.connection.LearningRule):
-            return self._get_node_obj(obj.connection.pre_obj)
-        return obj
+    @dispatch.register(nengo.Ensemble)
+    def convert_ensemble(self, ens):
+        return self.make_node(
+            ens,
+            type=self.get_typename(ens),
+            net=id(self._net),
+            net_label=self._labels.get(self._net, None),
+            size_in=ens.dimensions,
+            size_out=ens.dimensions,
+            radius=ens.radius,
+            n_neurons=ens.n_neurons,
+            neuron_type=ens.neuron_type,
+        )
+
+    @dispatch.register(nengo.Node)
+    def convert_node(self, node):
+        return self.make_node(
+            node,
+            type=self.get_typename(node),
+            net=id(self._net),
+            net_label=self._labels.get(self._net, None),
+            size_in=node.size_in,
+            size_out=node.size_out,
+        )
+
+    @dispatch.register(nengo.Probe)
+    def convert_probe(self, probe):
+        return None
 
     @dispatch.register(nengo.Connection)
     def convert_connection(self, conn):
-        source = self._get_node_obj(conn.pre_obj)
-        target = self._get_node_obj(conn.post_obj)
+        source = self.get_node_obj(conn.pre_obj)
+        target = self.get_node_obj(conn.post_obj)
         return self.make_edge(
             conn, source, target,
-            pre_type=self._get_typename(conn.pre_obj),
-            post_type=self._get_typename(conn.post_obj),
+            pre_type=self.get_typename(conn.pre_obj),
+            post_type=self.get_typename(conn.post_obj),
             synapse=conn.synapse,
             tau=conn.synapse.tau if hasattr(conn.synapse, 'tau') else None,
             function=conn.function,
@@ -323,13 +509,54 @@ class GexfConverter(object):
             learning_rule_type=conn.learning_rule_type
         )
 
+    def get_node_obj(self, obj):
+        """Get an object with a corresponding graph node related to *obj*.
+
+        For certain objects like `nengo.ensemble.Neurons` or
+        `nengo.connection.LearningRule` no graph node will be created. This
+        function will resolve such an object to a related object that has a
+        corresponding graph node (e.g., the ensemble for a neurons object or
+        the pre object for a learning rule).
+
+        In `GexfConverter` this is used to make sure connections are between
+        the correct nodes and do not introduce unrelated dangling nodes.
+        """
+        if isinstance(obj, nengo.ensemble.Neurons):
+            return obj.ensemble
+        elif isinstance(obj, nengo.connection.LearningRule):
+            return self.get_node_obj(obj.connection.pre_obj)
+        return obj
+
     @classmethod
-    def _get_typename(cls, obj):
+    def get_typename(cls, obj):
         tp = type(obj)
         return tp.__module__ + '.' + tp.__name__
 
 
 class CollapsingGexfConverter(GexfConverter):
+    """Converts Nengo models into GEXF files with some collapsed networks.
+
+    See `GexfConverter` for general information on conversion to GEXF files.
+    This class will collapse certain networks to a single node in the
+    conversion.
+
+    Parameters
+    ----------
+    to_collapse : sequence, optional
+        Network types to collapse, if not given the networks listed in
+        `NENGO_NETS` and `SPA_NETS` will be collapsed. Note that `SPA_NETS`
+        currently only contains networks from *nengo_spa*, but not the
+        *spa* module in core *nengo*.
+    labeler : optional
+        Object with a `get_labels` method that returns a dictionary mapping
+        model objects to labels. If not given, a new `InspectiveLabeler`
+        will be used.
+    hierarchical : bool, optional (default: False)
+        Whether to include information of the network hierarchy in the file.
+        Support for hierarchical graphs was removed in Gephi 0.9 and
+        hierarchical networks will be automatically flattened which leaves an
+        unconnected node for every network.
+    """
     dispatch = DispatchTable(GexfConverter.dispatch)
 
     NENGO_NETS = (
@@ -362,14 +589,15 @@ class CollapsingGexfConverter(GexfConverter):
         self.obj2collapsed = weakref.WeakKeyDictionary()
 
     def convert_collapsed(self, net):
+        """Used to convert a network into a collapsed graph node."""
         nodes = et.Element('nodes')
         nodes.append(self.make_node(
-            net, type=self._get_typename(net), net=id(self._net),
+            net, type=self.get_typename(net), net=id(self._net),
             net_label=self._labels.get(self._net, None)))
         self.obj2collapsed.update({
             child: net for child in net.all_objects})
         return nodes
 
-    def _get_node_obj(self, obj):
-        obj = super(CollapsingGexfConverter, self)._get_node_obj(obj)
+    def get_node_obj(self, obj):
+        obj = super(CollapsingGexfConverter, self).get_node_obj(obj)
         return self.obj2collapsed.get(obj, obj)
