@@ -453,7 +453,8 @@ class GexfConverter(object):
             for subnet in net.networks:
                 subnet_node = self.make_node(
                     subnet, type=self.get_typename(subnet), net=id(self._net),
-                    net_label=self._labels.get(self._net, None))
+                    net_label=self._labels.get(self._net, None),
+                    n_neurons=subnet.n_neurons)
                 subnet_node.append(self.dispatch(subnet))
                 nodes.append(subnet_node)
         else:
@@ -593,7 +594,8 @@ class CollapsingGexfConverter(GexfConverter):
         nodes = et.Element('nodes')
         nodes.append(self.make_node(
             net, type=self.get_typename(net), net=id(self._net),
-            net_label=self._labels.get(self._net, None)))
+            net_label=self._labels.get(self._net, None),
+            n_neurons=net.n_neurons))
         self.obj2collapsed.update({
             child: net for child in net.all_objects})
         return nodes
