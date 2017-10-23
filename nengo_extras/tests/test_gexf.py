@@ -5,7 +5,7 @@ import nengo
 import pytest
 
 from nengo_extras.gexf import (
-    CollapsingGexfConverter, DispatchTable, GexfConverter, InspectiveLabeler)
+    CollapsingGexfConverter, DispatchTable, GexfConverter, HierarchicalLabeler)
 
 
 def test_can_dispatch_table_defaults():
@@ -158,28 +158,31 @@ def test_dispatch_errors():
 
 def test_inspective_labeler():
     with nengo.Network() as model:
-        ens = nengo.Ensemble(10, 1)
-        with nengo.Network() as subnet:
-            node = nengo.Node(1.)
-            subnet.attr = nengo.Ensemble(10, 1)
+        model.ens = nengo.Ensemble(10, 1)
+        with nengo.Network() as model.subnet:
+            model.subnet.node = nengo.Node(1.)
+            model.subnet.attr = nengo.Ensemble(10, 1)
 
-    labels = InspectiveLabeler().get_labels(model)
-    assert labels == {
-        ens: 'ens',
-        subnet: 'subnet',
-        node: 'subnet.node',
-        subnet.attr: 'subnet.attr',
+    labels = HierarchicalLabeler().get_labels(model)
+    # relevant_labels = {
+        # id(k): labels.name(k) for k in (
+            # model.ens, model.subnet, model.subnet.node, model.subnet.attr)}
+    assert dict(labels) == {
+        model.ens: 'ens',
+        model.subnet: 'subnet',
+        model.subnet.node: 'subnet.node',
+        model.subnet.attr: 'subnet.attr',
     }
 
 
 def test_gexf_converter():
     with nengo.Network() as model:
-        ens = nengo.Ensemble(10, 1)
-        with nengo.Network() as subnet:
-            node = nengo.Node(1.)
-            subnet.attr = nengo.Ensemble(10, 1)
-        nengo.Connection(node, ens)
-        nengo.Probe(ens)
+        model.ens = nengo.Ensemble(10, 1)
+        with nengo.Network() as model.subnet:
+            model.subnet.node = nengo.Node(1.)
+            model.subnet.attr = nengo.Ensemble(10, 1)
+        nengo.Connection(model.subnet.node, model.ens)
+        nengo.Probe(model.ens)
 
     expected = (
         '<gexf version="1.3" '
@@ -271,12 +274,12 @@ def test_gexf_converter():
 
 def test_gexf_converter_hierarchical():
     with nengo.Network() as model:
-        ens = nengo.Ensemble(10, 1)
-        with nengo.Network() as subnet:
-            node = nengo.Node(1.)
-            subnet.attr = nengo.Ensemble(10, 1)
-        nengo.Connection(node, ens)
-        nengo.Probe(ens)
+        model.ens = nengo.Ensemble(10, 1)
+        with nengo.Network() as model.subnet:
+            model.subnet.node = nengo.Node(1.)
+            model.subnet.attr = nengo.Ensemble(10, 1)
+        nengo.Connection(model.subnet.node, model.ens)
+        nengo.Probe(model.ens)
 
     expected = (
         '<gexf version="1.3" '
@@ -379,9 +382,7 @@ def test_gexf_converter_hierarchical():
 
 def test_collapsing_gexf_converter():
     with nengo.Network() as model:
-        ea = nengo.networks.EnsembleArray(10, 10)
-
-    assert ea  # hide pylint unused warning
+        model.ea = nengo.networks.EnsembleArray(10, 10)
 
     expected = (
         '<gexf version="1.3" '

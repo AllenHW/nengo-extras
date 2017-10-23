@@ -1,8 +1,7 @@
 """Export to GEXF for visualization of networks in Gephi."""
 
-from collections import namedtuple, OrderedDict
+from collections import namedtuple, Mapping, OrderedDict, Sequence
 from datetime import date
-import gc
 import weakref
 import xml.etree.ElementTree as et
 
@@ -107,107 +106,77 @@ class DispatchTable(object):
         return self.InstDispatch(self, inst, owner)
 
 
-class InspectiveLabeler(object):
+class HierarchicalLabeler(object):
     """Obtains labels for objects in a Nengo network.
 
-    It will inspect dictionaries and stack frames referring to the objects to
-    find a suitable name. This does not always work because there will not
-    be a name in memory for objects that where created in methods that finished
-    executing without assigning the object to an attribute. Those objects
-    might end up with a non-useful name from some other stack frame.
-
-    Note that the labeling can take a while because the all Python objects
-    need to be scanned to find the referring objects.
+    The names will include the network hierarchy.
 
     Usage example::
 
-        labels = InspectiveLabeler().get_labels(model)
+        labels = HierarchicalLabeler().get_labels(model)
     """
 
     dispatch = DispatchTable()
 
-    def get_labels(self, net):
-        """Get labels for objects in *net*.
+    def __init__(self):
+        self._names = None
 
-        Note that outer *net* itself will not be included.
+    @dispatch.register(Sequence)
+    def get_labels_from_sequence(self, seq):
+        base_name = self._names[seq]
+        for i, obj in enumerate(seq):
+            self._handle_found_name(obj, '{base_name}[{i}]'.format(
+                base_name=base_name, i=i))
 
-        Returns
-        -------
-        dict
-            Dictionary mapping objects to names.
-        """
+    @dispatch.register(Mapping)
+    def get_labels_from_mapping(self, mapping):
+        base_name = self._names[mapping]
+        for k in mapping:
+            obj = mapping[k]
+            self._handle_found_name(obj, '{base_name}[{k}]'.format(
+                base_name=base_name, k=k))
 
-        labels = {}
-        for group in net.objects.values():
-            for o in group:
-                labels.update(self.dispatch(o))
-        return labels
+    @dispatch.register(object)
+    def get_labels_from_object(self, obj):
+        pass
 
     @dispatch.register(nengo.Network)
-    def get_net_labels(self, net):
-        """Get labels for objects in *net* prepended with *net's* label.
-
-        Returns
-        -------
-        dict
-            Dictionary mapping objects to names.
-        """
-        labels = self.get_obj_label(net)
-        labels.update({
-            k: labels[net] + '.' + v for k, v in self.get_labels(net).items()})
-        return labels
-
-    @dispatch.register(nengo.base.NengoObject)
-    def get_obj_label(self, obj):
-        """Get labels for object *obj*.
-
-        Returns
-        -------
-        dict
-            Dictionary with the mapping from *obj* to it's label.
-        """
-        name = None
-        if obj.label is not None:
-            name = obj.label
+    def get_labels_from_network(self, net):
+        if net in self._names:
+            base_name = self._names[net] + '.'
         else:
-            for referrer in gc.get_referrers(obj):
-                if hasattr(referrer, 'items'):
-                    new_name = self._find_name_in_dict(referrer, obj)
-                    if new_name is not None:
-                        name = new_name
-                elif name is None and self._is_frame(referrer):
-                    name = self._find_name_in_frame(referrer, obj)
-        if name is None:
-            name = str(obj)
-        return {obj: name}
+            base_name = ''
 
-    @classmethod
-    def _find_name_in_dict(cls, d, obj):
-        for k, v in d.items():
-            if not isinstance(k, str):
-                break
-            if v is obj:
-                return k
-        return None
+        check_last = {
+            'ensembles', 'nodes', 'connections', 'networks', 'probes'}
+        check_never = {
+            'all_ensembles', 'all_nodes', 'all_connections', 'all_networks',
+            'all_objects', 'all_probes'}
 
-    @classmethod
-    def _find_name_in_frame(cls, f, obj):
-        name = None
-        if f.f_back is not None:
-            name = cls._find_name_in_frame(f.f_back, obj)
-        if name is None:
-            name = cls._find_name_in_dict(f.f_locals, obj)
-        if name is None:
-            name = cls._find_name_in_dict(f.f_globals, obj)
-        return name
+        for name in dir(net):
+            if (not name.startswith('_') and
+                    name not in check_last | check_never):
+                try:
+                    attr = getattr(net, name)
+                except AttributeError:
+                    pass
+                else:
+                    self._handle_found_name(attr, base_name + name)
 
-    @classmethod
-    def _is_frame(cls, f):
-        return (
-            hasattr(f, 'f_back') and
-            hasattr(f, 'f_locals') and
-            hasattr(f, 'f_globals')
-        )
+        for name in check_last:
+            attr = getattr(net, name)
+            self._handle_found_name(attr, base_name + name)
+
+    def _handle_found_name(self, obj, name):
+        if (isinstance(obj, (nengo.base.NengoObject, nengo.Network)) and
+                obj not in self._names):
+            self._names[obj] = name
+            self.dispatch(obj)
+
+    def get_labels(self, model):
+        self._names = weakref.WeakKeyDictionary()
+        self.dispatch(model)
+        return self._names
 
 
 Attr = namedtuple('Attr', ['id', 'type', 'default'])
@@ -259,7 +228,7 @@ class GexfConverter(object):
     ----------
     labeler : optional
         Object with a `get_labels` method that returns a dictionary mapping
-        model objects to labels. If not given, a new `InspectiveLabeler`
+        model objects to labels. If not given, a new `HierarchicalLabeler`
         will be used.
     hierarchical : bool, optional (default: False)
         Whether to include information of the network hierarchy in the file.
@@ -300,7 +269,7 @@ class GexfConverter(object):
 
     def __init__(self, labeler=None, hierarchical=False):
         if labeler is None:
-            labeler = InspectiveLabeler()
+            labeler = HierarchicalLabeler()
         self.labeler = labeler
         self.hierarchical = hierarchical
         self.version = (1, 3)
@@ -320,9 +289,8 @@ class GexfConverter(object):
         xml.etree.ElementTree.ElementTree
             Converted model.
         """
-        self._labels = weakref.WeakKeyDictionary(
-            self.labeler.get_labels(model))
-        self._labels.update(self.labeler.get_obj_label(model))
+        self._labels = self.labeler.get_labels(model)
+        self._labels[model] = 'model'
         return self.make_document(model)
 
     def make_document(self, model):
