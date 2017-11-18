@@ -1,20 +1,16 @@
 .. include::
    ../README.rst
 
-Full API documentation
-======================
+
+********
+Contents
+********
 
 .. toctree::
    :maxdepth: 2
 
-   api/nengo_extras
-
-Changelog
-=========
-
-.. toctree::
-   :maxdepth: 2
-
+   guide/guide
+   api/api
    changelog
 
 * :ref:`genindex`
