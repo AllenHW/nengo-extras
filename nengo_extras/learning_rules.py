@@ -119,7 +119,6 @@ def build_aml(model, aml, rule):
         aml.learning_rate, base_decoders, pre, error, decoders))
 
 
-
 class DeltaRuleFunctionParam(FunctionParam):
     function_test_size = 8  # arbitrary size to test function
 
